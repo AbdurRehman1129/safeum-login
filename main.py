@@ -1,112 +1,125 @@
 import websocket
-import gzip
 import json
 import random
-import hashlib
-import time
+import gzip
+import traceback
 
-# Enable WebSocket debugging
-websocket.enableTrace(True)
-
-# List of SafeUM nodes (alternative servers)
-ADDRESS_LISTS = [
+# Define constants
+HEADERS = {
+    "User-Agent": "SafeUMClient/1.0",
+    "Connection": "Upgrade",
+    "Upgrade": "websocket",
+    "Sec-WebSocket-Protocol": "binary"
+}
+INITIAL_NODES = [
     "193.200.173.45",
     "185.65.206.12",
     "195.13.182.217",
     "195.13.182.213",
-    "180.210.203.183",
+    "180.210.203.183"
 ]
 PORT = 8080
-ENDPOINT = "/Auth"  # Change this if the endpoint differs
+BAL_ENDPOINT = "/Bal"
+AUTH_ENDPOINT = "/Auth"
 
-# Generate a random device UID
-def generate_device_uid():
-    random_string = f"{random.randint(1000, 9999)}-{random.randint(1000, 9999)}"
-    return hashlib.md5(random_string.encode()).hexdigest()
 
-# Decompress GZIP responses
-def decompress_response(response):
-    return gzip.decompress(response).decode('utf-8')
+# Function to decompress gzip responses
+def decompress_response(compressed_data):
+    try:
+        return gzip.decompress(compressed_data).decode('utf-8')
+    except Exception as e:
+        print(f"[-] Failed to decompress response: {e}")
+        return compressed_data.decode('utf-8', errors='ignore')
 
-# Fetch Unique Key
-def fetch_unique_key(ws, device_uid, software_version="1.0"):
+
+# Function to fetch nodes from the /Bal endpoint
+def fetch_nodes(node):
+    try:
+        print(f"[+] Connecting to node {node}{BAL_ENDPOINT}")
+        ws = websocket.create_connection(f"ws://{node}:{PORT}{BAL_ENDPOINT}", header=HEADERS)
+        payload = {
+            "action": "Balancer",
+            "subaction": "Query",
+            "id": random.randint(1000, 9999),
+        }
+        ws.send(json.dumps(payload))
+        compressed_response = ws.recv()
+        ws.close()
+        response = decompress_response(compressed_response)
+        return json.loads(response).get("nodes", {})
+    except Exception as e:
+        print(f"[-] Failed to fetch nodes from {node}: {e}")
+        return {}
+
+
+# Function to fetch a unique key for authentication
+def fetch_unique_key(ws, device_uid="1234567890", software_version="1.0"):
     payload = {
         "action": "Login",
         "subaction": "GetKeyUnique",
         "deviceuid": device_uid,
         "softwareversion": software_version,
-        "id": random.randint(1000, 9999),
+        "id": random.randint(1000, 9999)
     }
     ws.send(json.dumps(payload))
     compressed_response = ws.recv()
     response = decompress_response(compressed_response)
-    return json.loads(response)
+    return json.loads(response).get("key", {})
 
-# Login
-def login(ws, username, password, unique_key, device_uid, software_version="1.0"):
-    # Hash password with the unique key (hypothetical; SafeUM's real hashing is unknown)
-    password_hash = hashlib.sha256((password + unique_key['x']).encode()).hexdigest()
-    
+
+# Function to log in using username and password
+def login(ws, username, password, unique_key):
     payload = {
         "action": "login",
         "subaction": "alt",
-        "deviceuid": device_uid,
-        "softwareversion": software_version,
         "login": username,
-        "password": password_hash,
+        "password": password,
+        "key": unique_key,
+        "id": random.randint(1000, 9999)
     }
     ws.send(json.dumps(payload))
     compressed_response = ws.recv()
     response = decompress_response(compressed_response)
     return json.loads(response)
 
-# Connect to a WebSocket node
-def connect_to_node(node, port, endpoint):
-    websocket_url = f"ws://{node}:{port}{endpoint}"
-    headers = {"User-Agent": "SafeUMClient/1.0"}
-    try:
-        ws = websocket.create_connection(websocket_url, timeout=10, header=headers, subprotocols=["binary"])
-        print(f"[+] Connected to {websocket_url}")
-        return ws
-    except Exception as e:
-        print(f"[-] Failed to connect to {websocket_url}: {e}")
-        return None
 
 # Main function
 def main():
-    device_uid = generate_device_uid()
-    ws = None
+    global INITIAL_NODES
+    dynamic_nodes = {}
 
-    # Attempt to connect to each node in the list
-    for node in ADDRESS_LISTS:
-        ws = connect_to_node(node, PORT, ENDPOINT)
-        if ws:
+    # Step 1: Fetch dynamic nodes from /Bal endpoint
+    for node in INITIAL_NODES:
+        dynamic_nodes = fetch_nodes(node)
+        if dynamic_nodes:
+            print("[+] Nodes fetched:", dynamic_nodes)
             break
-    if not ws:
-        print("[-] All connection attempts failed.")
+    else:
+        print("[-] Failed to fetch nodes from all initial nodes.")
         return
 
-    try:
-        # Fetch the unique key
-        unique_key_response = fetch_unique_key(ws, device_uid)
-        if unique_key_response["status"] != "Success":
-            print("[-] Failed to fetch unique key:", unique_key_response)
+    # Step 2: Use dynamic nodes to authenticate
+    for priority, node in sorted(dynamic_nodes.items()):
+        print(f"[+] Trying to connect to node {node} for authentication...")
+        try:
+            ws = websocket.create_connection(f"ws://{node}:{PORT}{AUTH_ENDPOINT}", header=HEADERS)
+            # Fetch unique key
+            unique_key = fetch_unique_key(ws)
+            print("[+] Unique key fetched:", unique_key)
+
+            # Login with username and password
+            username = input("Enter your username: ")
+            password = input("Enter your password: ")
+            response = login(ws, username, password, unique_key)
+            print("[+] Login response:", response)
+            ws.close()
             return
-        
-        unique_key = unique_key_response["key"]
-        print("[+] Unique key fetched:", unique_key)
-        
-        # Perform login
-        username = input("Enter your username: ")
-        password = input("Enter your password: ")
-        login_response = login(ws, username, password, unique_key, device_uid)
-        
-        if login_response["status"] == "Success":
-            print("[+] Login successful:", login_response)
-        else:
-            print("[-] Login failed:", login_response)
-    finally:
-        ws.close()
+        except Exception as e:
+            print(f"[-] Failed to connect to {node}: {e}")
+            traceback.print_exc()
+
+    print("[-] All connection attempts failed.")
+
 
 if __name__ == "__main__":
     main()
