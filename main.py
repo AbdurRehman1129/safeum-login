@@ -3,6 +3,21 @@ import gzip
 import json
 import random
 import hashlib
+import time
+
+# Enable WebSocket debugging
+websocket.enableTrace(True)
+
+# List of SafeUM nodes (alternative servers)
+ADDRESS_LISTS = [
+    "193.200.173.45",
+    "185.65.206.12",
+    "195.13.182.217",
+    "195.13.182.213",
+    "180.210.203.183",
+]
+PORT = 8080
+ENDPOINT = "/Auth"  # Change this if the endpoint differs
 
 # Generate a random device UID
 def generate_device_uid():
@@ -45,15 +60,32 @@ def login(ws, username, password, unique_key, device_uid, software_version="1.0"
     response = decompress_response(compressed_response)
     return json.loads(response)
 
+# Connect to a WebSocket node
+def connect_to_node(node, port, endpoint):
+    websocket_url = f"ws://{node}:{port}{endpoint}"
+    headers = {"User-Agent": "SafeUMClient/1.0"}
+    try:
+        ws = websocket.create_connection(websocket_url, timeout=10, header=headers, subprotocols=["binary"])
+        print(f"[+] Connected to {websocket_url}")
+        return ws
+    except Exception as e:
+        print(f"[-] Failed to connect to {websocket_url}: {e}")
+        return None
+
 # Main function
 def main():
-    # WebSocket connection setup
-    websocket_url = "ws://193.200.173.45:8080/Auth"  # Update as needed
     device_uid = generate_device_uid()
-    
-    ws = websocket.create_connection(websocket_url, subprotocols=["binary"])
-    print("[*] Connected to SafeUM server")
-    
+    ws = None
+
+    # Attempt to connect to each node in the list
+    for node in ADDRESS_LISTS:
+        ws = connect_to_node(node, PORT, ENDPOINT)
+        if ws:
+            break
+    if not ws:
+        print("[-] All connection attempts failed.")
+        return
+
     try:
         # Fetch the unique key
         unique_key_response = fetch_unique_key(ws, device_uid)
